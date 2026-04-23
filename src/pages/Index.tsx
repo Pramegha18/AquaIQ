@@ -1,5 +1,13 @@
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef, useMemo } from "react";
 import { supabase } from "@/integrations/supabase/client";
+import {
+  BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
+  LineChart, Line, Legend, Cell,
+} from "recharts";
+import {
+  Droplets, Activity, Zap, IndianRupee, Download, Play, Loader2,
+  AlertCircle, CheckCircle2, ArrowRight, Beaker, Filter, Sparkles, Recycle,
+} from "lucide-react";
 
 type Source = "Municipal Sewage" | "Industrial Effluent" | "Agricultural Runoff" | "Stormwater" | "Greywater";
 type Status = "PASS" | "WARN" | "FAIL";
@@ -38,45 +46,68 @@ const PRESETS: Record<string, SampleInputs> = {
   "Near Clean": { ph: 7.4, turbidity: 8, tds: 220, bod: 5, source: "Municipal Sewage" },
 };
 
-const STANDARDS = {
-  ph: "6.5 – 8.5",
-  turbidity: "≤ 5 NTU",
-  tds: "≤ 500 mg/L",
-  bod: "≤ 3 mg/L",
-};
-
+const STANDARDS = { ph: "6.5 – 8.5", turbidity: "≤ 5 NTU", tds: "≤ 500 mg/L", bod: "≤ 3 mg/L" };
 const SOURCES: Source[] = ["Municipal Sewage", "Industrial Effluent", "Agricultural Runoff", "Stormwater", "Greywater"];
 
-const phColor = (ph: number) => {
+// Treatment cost table (₹/kL)
+const STAGE_COST = { primary: 8, secondary: 18, tertiary: 35 };
+
+const phStatusColor = (ph: number) => {
   if (ph < 6 || ph > 9) return "destructive";
   if (ph < 6.5 || ph > 8.5) return "warning";
   return "success";
 };
 
-const scoreColor = (s: number) => (s < 40 ? "hsl(var(--destructive))" : s < 70 ? "hsl(var(--warning))" : "hsl(var(--success))");
+const scoreHsl = (s: number) =>
+  s < 40 ? "hsl(var(--destructive))" : s < 70 ? "hsl(var(--warning))" : "hsl(var(--success))";
 
-const StatusIcon = ({ s }: { s: Status }) => {
-  if (s === "PASS") return <span className="text-success font-mono">✓</span>;
-  if (s === "WARN") return <span className="text-warning font-mono">⚠</span>;
-  return <span className="text-destructive font-mono">✗</span>;
-};
+// Compute "after treatment" estimates from raw inputs + active stages.
+// Primary: turbidity -60%, BOD -25%, TDS -10%
+// Secondary: BOD -70%, turbidity -20% (additional), TDS -15%
+// Tertiary: TDS -80%, turbidity -90% (additional), BOD -50% (additional)
+function computeAfter(inp: SampleInputs, stages: { primary: boolean; secondary: boolean; tertiary: boolean }) {
+  let { turbidity, tds, bod } = inp;
+  if (stages.primary) {
+    turbidity *= 0.4;
+    bod *= 0.75;
+    tds *= 0.9;
+  }
+  if (stages.secondary) {
+    turbidity *= 0.8;
+    bod *= 0.3;
+    tds *= 0.85;
+  }
+  if (stages.tertiary) {
+    turbidity *= 0.1;
+    bod *= 0.5;
+    tds *= 0.2;
+  }
+  return {
+    turbidity: Math.max(0.1, +turbidity.toFixed(1)),
+    tds: Math.max(1, +tds.toFixed(0)),
+    bod: Math.max(0.1, +bod.toFixed(1)),
+  };
+}
 
 const SliderRow = ({
-  label, unit, value, min, max, step, onChange, indicator,
+  icon: Icon, label, unit, value, min, max, step, onChange, indicator,
 }: {
-  label: string; unit: string; value: number; min: number; max: number; step: number;
+  icon: any; label: string; unit: string; value: number; min: number; max: number; step: number;
   onChange: (v: number) => void; indicator?: "destructive" | "warning" | "success";
 }) => (
-  <div className="space-y-2">
+  <div className="space-y-2.5">
     <div className="flex items-center justify-between">
-      <label className="text-xs uppercase tracking-wider text-muted-foreground">{label}</label>
       <div className="flex items-center gap-2">
+        <Icon className="w-4 h-4 text-primary" />
+        <label className="text-sm font-medium text-foreground">{label}</label>
         {indicator && (
           <span
             className="w-2 h-2 rounded-full"
             style={{ backgroundColor: `hsl(var(--${indicator}))`, boxShadow: `0 0 6px hsl(var(--${indicator}))` }}
           />
         )}
+      </div>
+      <div className="flex items-center gap-1.5">
         <input
           type="number"
           value={value}
@@ -84,67 +115,47 @@ const SliderRow = ({
           max={max}
           step={step}
           onChange={(e) => onChange(Math.min(max, Math.max(min, Number(e.target.value) || 0)))}
-          className="w-20 bg-input border border-border px-2 py-1 text-right font-mono text-sm text-primary focus:outline-none focus:border-primary"
+          className="w-20 bg-secondary/60 border border-border rounded-lg px-2 py-1 text-right font-mono text-sm text-primary font-semibold focus:outline-none focus:ring-2 focus:ring-primary/30 transition"
         />
-        <span className="text-xs text-muted-foreground font-mono w-10">{unit}</span>
+        <span className="text-xs text-muted-foreground font-mono w-12">{unit}</span>
       </div>
     </div>
     <input
-      type="range"
-      min={min}
-      max={max}
-      step={step}
-      value={value}
+      type="range" min={min} max={max} step={step} value={value}
       onChange={(e) => onChange(Number(e.target.value))}
       className="aqua-range w-full"
     />
-    <div className="flex justify-between text-[10px] text-muted-foreground font-mono">
-      <span>{min}</span>
-      <span>{max}</span>
-    </div>
   </div>
 );
 
-const PipelineStage = ({
-  label, sub, active, idx,
-}: { label: string; sub: string; active: boolean; idx: number }) => (
+const StageCard = ({
+  active, idx, label, sub, icon: Icon,
+}: { active: boolean; idx: number; label: string; sub: string; icon: any }) => (
   <div
-    className={`relative panel p-4 transition-all ${active ? "border-primary animate-pulse-ring" : "opacity-40"}`}
+    className={`relative flex-1 rounded-2xl p-4 border transition-all duration-500 ${
+      active
+        ? "bg-gradient-to-br from-primary/10 to-accent/5 border-primary/40 shadow-lg shadow-primary/10 scale-105"
+        : "bg-secondary/40 border-border opacity-60"
+    }`}
   >
-    <div className="flex items-center gap-3">
+    <div className="flex items-center gap-3 mb-2">
       <div
-        className={`w-8 h-8 flex items-center justify-center font-mono text-sm border ${
-          active ? "border-primary text-primary" : "border-border text-muted-foreground"
+        className={`w-10 h-10 rounded-xl flex items-center justify-center transition-colors ${
+          active ? "bg-gradient-primary text-white animate-pulse-soft" : "bg-muted text-muted-foreground"
         }`}
       >
-        {idx}
+        <Icon className="w-5 h-5" />
       </div>
-      <div className="flex-1">
-        <div className={`text-sm font-bold uppercase tracking-wider ${active ? "text-foreground" : "text-muted-foreground"}`}>
-          {label}
-        </div>
-        <div className="text-[10px] text-muted-foreground uppercase tracking-wider">{sub}</div>
-      </div>
-      <div className={`text-[10px] font-mono px-2 py-1 border ${active ? "border-primary text-primary" : "border-border text-muted-foreground"}`}>
-        {active ? "ACTIVE" : "SKIP"}
+      <div>
+        <div className="text-[10px] font-mono text-muted-foreground uppercase tracking-wider">Stage {idx}</div>
+        <div className="font-semibold text-sm text-foreground">{label}</div>
       </div>
     </div>
-  </div>
-);
-
-const Arrow = ({ active, vertical = true }: { active: boolean; vertical?: boolean }) => (
-  <div className={`flex items-center justify-center ${vertical ? "h-6" : "w-6"}`}>
-    <div
-      className={`relative ${vertical ? "w-0.5 h-full" : "h-0.5 w-full"} overflow-hidden ${
-        active ? "bg-primary/30" : "bg-border"
-      }`}
-    >
-      {active && (
-        <div
-          className={`absolute ${vertical ? "left-0 right-0 h-3 bg-primary animate-flow" : "top-0 bottom-0 w-3 bg-primary"}`}
-          style={!vertical ? { animation: "flow 1.5s linear infinite" } : {}}
-        />
-      )}
+    <div className="text-xs text-muted-foreground">{sub}</div>
+    <div className={`mt-2 inline-flex items-center gap-1 text-[10px] font-mono px-2 py-0.5 rounded-full ${
+      active ? "bg-success/10 text-success" : "bg-muted text-muted-foreground"
+    }`}>
+      {active ? "● ACTIVE" : "○ SKIPPED"}
     </div>
   </div>
 );
@@ -153,45 +164,46 @@ const QualityRing = ({ score }: { score: number }) => {
   const r = 70;
   const c = 2 * Math.PI * r;
   const offset = c - (score / 100) * c;
-  const color = scoreColor(score);
+  const color = scoreHsl(score);
   return (
-    <div className="relative w-44 h-44">
+    <div className="relative w-44 h-44 animate-scale-in">
       <svg viewBox="0 0 160 160" className="w-full h-full -rotate-90">
-        <circle cx="80" cy="80" r={r} fill="none" stroke="hsl(var(--secondary))" strokeWidth="8" />
+        <circle cx="80" cy="80" r={r} fill="none" stroke="hsl(var(--secondary))" strokeWidth="10" />
         <circle
-          cx="80" cy="80" r={r} fill="none" stroke={color} strokeWidth="8"
+          cx="80" cy="80" r={r} fill="none" stroke={color} strokeWidth="10"
           strokeDasharray={c} strokeDashoffset={offset} strokeLinecap="round"
-          style={{ transition: "stroke-dashoffset 1s ease, stroke 0.4s", filter: `drop-shadow(0 0 6px ${color})` }}
+          style={{ transition: "stroke-dashoffset 1.2s cubic-bezier(0.16,1,0.3,1), stroke 0.4s" }}
         />
       </svg>
       <div className="absolute inset-0 flex flex-col items-center justify-center">
-        <div className="font-mono text-4xl font-bold" style={{ color }}>{score}</div>
-        <div className="text-[10px] uppercase tracking-widest text-muted-foreground">Quality / 100</div>
+        <div className="font-display text-5xl font-bold" style={{ color }}>{score}</div>
+        <div className="text-[10px] uppercase tracking-widest text-muted-foreground mt-1">Quality / 100</div>
       </div>
     </div>
   );
 };
 
-const reuseBadgeColor = (c: ReuseClass) => {
-  if (c === "POTABLE") return "success";
-  if (c === "INDUSTRIAL") return "primary";
-  if (c === "IRRIGATION") return "warning";
-  return "destructive";
+const reuseStyle = (c: ReuseClass) => {
+  if (c === "POTABLE") return "bg-success/10 text-success border-success/30";
+  if (c === "INDUSTRIAL") return "bg-primary/10 text-primary border-primary/30";
+  if (c === "IRRIGATION") return "bg-warning/10 text-warning border-warning/30";
+  return "bg-destructive/10 text-destructive border-destructive/30";
 };
 
-const MetricCard = ({ label, value, unit }: { label: string; value: string; unit: string }) => (
-  <div className="panel p-3">
-    <div className="text-[10px] uppercase tracking-widest text-muted-foreground">{label}</div>
-    <div className="flex items-baseline gap-1 mt-1">
-      <span className="font-mono text-2xl text-primary font-bold">{value}</span>
-      <span className="font-mono text-[10px] text-muted-foreground">{unit}</span>
-    </div>
-  </div>
-);
+const StatusPill = ({ s }: { s: Status }) => {
+  const styles = s === "PASS"
+    ? "bg-success/10 text-success"
+    : s === "WARN"
+    ? "bg-warning/10 text-warning"
+    : "bg-destructive/10 text-destructive";
+  return (
+    <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-mono font-semibold ${styles}`}>
+      {s === "PASS" ? "✓" : s === "WARN" ? "⚠" : "✗"} {s}
+    </span>
+  );
+};
 
-const Skeleton = ({ className = "" }: { className?: string }) => (
-  <div className={`skeleton ${className}`} />
-);
+const Skeleton = ({ className = "" }: { className?: string }) => <div className={`skeleton ${className}`} />;
 
 export default function Index() {
   const [inputs, setInputs] = useState<SampleInputs>({
@@ -201,6 +213,7 @@ export default function Index() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [history, setHistory] = useState<HistoryEntry[]>([]);
+  const [chartKey, setChartKey] = useState(0);
   const reportRef = useRef<HTMLDivElement>(null);
 
   const update = (k: keyof SampleInputs, v: number | string) =>
@@ -210,19 +223,18 @@ export default function Index() {
     setLoading(true);
     setError(null);
     try {
-      const { data, error: fnErr } = await supabase.functions.invoke("analyze-water", {
-        body: inputs,
-      });
+      const { data, error: fnErr } = await supabase.functions.invoke("analyze-water", { body: inputs });
       if (fnErr) throw fnErr;
       if (data?.error) throw new Error(data.error);
       const result = data as Analysis;
       if (typeof result.qualityScore !== "number") throw new Error("Malformed response");
       setAnalysis(result);
+      setChartKey((k) => k + 1);
       setHistory((h) => [
         { ts: Date.now(), source: inputs.source, score: result.qualityScore, reuseClass: result.reuseClass },
         ...h,
       ].slice(0, 5));
-      setTimeout(() => reportRef.current?.scrollIntoView({ behavior: "smooth", block: "nearest" }), 100);
+      setTimeout(() => reportRef.current?.scrollIntoView({ behavior: "smooth", block: "start" }), 150);
     } catch (e: any) {
       setError(e?.message || "Failed to analyze sample");
     } finally {
@@ -231,6 +243,32 @@ export default function Index() {
   };
 
   const loadPreset = (k: string) => setInputs(PRESETS[k]);
+
+  // Derived: after-values & cost data — recompute live
+  const after = useMemo(() => {
+    const stages = analysis?.treatmentStages ?? { primary: false, secondary: false, tertiary: false };
+    return computeAfter(inputs, stages);
+  }, [inputs, analysis]);
+
+  const beforeAfterData = useMemo(() => ([
+    { name: "Turbidity", before: inputs.turbidity, after: after.turbidity, unit: "NTU" },
+    { name: "TDS", before: inputs.tds, after: after.tds, unit: "mg/L" },
+    { name: "BOD", before: inputs.bod, after: after.bod, unit: "mg/L" },
+  ]), [inputs, after]);
+
+  const totalCost = analysis
+    ? (analysis.treatmentStages.primary ? STAGE_COST.primary : 0) +
+      (analysis.treatmentStages.secondary ? STAGE_COST.secondary : 0) +
+      (analysis.treatmentStages.tertiary ? STAGE_COST.tertiary : 0)
+    : 0;
+  const maxPossibleCost = STAGE_COST.primary + STAGE_COST.secondary + STAGE_COST.tertiary;
+  const costSaved = analysis ? maxPossibleCost - totalCost : 0;
+
+  const costData = useMemo(() => ([
+    { stage: "Primary", cost: STAGE_COST.primary, active: analysis?.treatmentStages.primary ?? false },
+    { stage: "Secondary", cost: STAGE_COST.secondary, active: analysis?.treatmentStages.secondary ?? false },
+    { stage: "Tertiary", cost: STAGE_COST.tertiary, active: analysis?.treatmentStages.tertiary ?? false },
+  ]), [analysis]);
 
   const exportReport = () => {
     if (!analysis) return;
@@ -242,9 +280,9 @@ Generated: ${ts}
 INPUT
   Source:     ${inputs.source}
   pH:         ${inputs.ph}
-  Turbidity:  ${inputs.turbidity} NTU
-  TDS:        ${inputs.tds} mg/L
-  BOD:        ${inputs.bod} mg/L
+  Turbidity:  ${inputs.turbidity} NTU  →  After: ${after.turbidity} NTU
+  TDS:        ${inputs.tds} mg/L  →  After: ${after.tds} mg/L
+  BOD:        ${inputs.bod} mg/L  →  After: ${after.bod} mg/L
 
 RESULT
   Quality Score:        ${analysis.qualityScore}/100
@@ -256,7 +294,7 @@ TREATMENT PIPELINE
   Tertiary:   ${analysis.treatmentStages.tertiary ? "ACTIVE" : "SKIP"}
 
 METRICS
-  Cost:       ₹${analysis.costPerKL}/kL
+  Cost:       ₹${analysis.costPerKL}/kL  (Saved: ₹${costSaved}/kL vs full treatment)
   Energy:     ${analysis.energyKWh} kWh/kL
   Efficiency: ${analysis.efficiencyPercent}%
 
@@ -280,86 +318,107 @@ ${analysis.narrative}
     URL.revokeObjectURL(url);
   };
 
-  const phInd = phColor(inputs.ph);
+  const phInd = phStatusColor(inputs.ph);
+  const stages = analysis?.treatmentStages;
 
   return (
-    <div className="min-h-screen bg-background text-foreground">
+    <div className="min-h-screen">
       {/* Header */}
-      <header className="border-b border-border bg-card">
+      <header className="sticky top-0 z-30 backdrop-blur-xl bg-card/80 border-b border-border">
         <div className="max-w-[1600px] mx-auto px-6 py-4 flex items-center justify-between">
           <div className="flex items-center gap-3">
-            <div className="w-9 h-9 border border-primary flex items-center justify-center text-primary glow">
-              <svg viewBox="0 0 24 24" className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth="2">
-                <path d="M12 2 L18 12 a6 6 0 1 1 -12 0 Z" />
-              </svg>
+            <div className="w-10 h-10 rounded-xl bg-gradient-primary flex items-center justify-center text-white shadow-lg shadow-primary/30">
+              <Droplets className="w-5 h-5" />
             </div>
             <div>
-              <h1 className="text-lg font-bold tracking-wider">AQUA<span className="text-primary">IQ</span></h1>
-              <div className="text-[10px] uppercase tracking-widest text-muted-foreground">Wastewater Treatment & Reuse Decision System</div>
+              <h1 className="font-display text-xl font-bold tracking-tight">
+                Aqua<span className="bg-gradient-primary bg-clip-text text-transparent">IQ</span>
+              </h1>
+              <div className="text-[11px] text-muted-foreground">Smart Wastewater Treatment & Reuse Decision System</div>
             </div>
           </div>
-          <div className="hidden md:flex items-center gap-4 font-mono text-[10px] text-muted-foreground uppercase tracking-widest">
-            <div className="flex items-center gap-2">
-              <span className="w-2 h-2 rounded-full bg-success animate-pulse" />
-              SYS_ONLINE
+          <div className="hidden md:flex items-center gap-4 text-xs text-muted-foreground">
+            <div className="flex items-center gap-2 px-3 py-1.5 rounded-full bg-success/10 text-success">
+              <span className="w-1.5 h-1.5 rounded-full bg-success animate-pulse" />
+              <span className="font-medium">System Online</span>
             </div>
-            <div>v1.0 / IS-10500</div>
+            <span className="font-mono">v2.0 · IS-10500</span>
           </div>
         </div>
       </header>
 
-      <main className="max-w-[1600px] mx-auto px-6 py-6 space-y-6">
+      <main className="max-w-[1600px] mx-auto px-6 py-8 space-y-6">
+        {/* Hero / Visual Flow */}
+        <section className="card-soft bg-gradient-hero p-6 animate-fade-in-up">
+          <div className="flex flex-col md:flex-row items-center justify-between gap-4">
+            <div>
+              <h2 className="font-display text-2xl font-bold text-foreground">Treatment Decision Dashboard</h2>
+              <p className="text-sm text-muted-foreground mt-1">Real-time analysis · AI-driven recommendations · Cost-optimized pipelines</p>
+            </div>
+            <div className="flex items-center gap-2 text-xs">
+              {[
+                { icon: Beaker, label: "Input", active: true },
+                { icon: Filter, label: "Treatment", active: !!stages },
+                { icon: Sparkles, label: "Output", active: !!analysis },
+                { icon: Recycle, label: "Reuse", active: !!analysis },
+              ].map((s, i, arr) => (
+                <div key={s.label} className="flex items-center gap-2">
+                  <div className={`flex items-center gap-2 px-3 py-2 rounded-xl border transition-all ${
+                    s.active ? "bg-card border-primary/40 text-primary shadow-sm" : "bg-card/60 border-border text-muted-foreground"
+                  }`}>
+                    <s.icon className="w-4 h-4" />
+                    <span className="font-medium">{s.label}</span>
+                  </div>
+                  {i < arr.length - 1 && <ArrowRight className={`w-4 h-4 ${s.active ? "text-primary" : "text-muted-foreground/50"}`} />}
+                </div>
+              ))}
+            </div>
+          </div>
+        </section>
+
         {/* Presets */}
         <div className="flex flex-wrap items-center gap-2">
-          <span className="text-[10px] uppercase tracking-widest text-muted-foreground font-mono mr-2">Presets:</span>
+          <span className="text-xs text-muted-foreground font-medium mr-1">Quick presets:</span>
           {Object.keys(PRESETS).map((k) => (
             <button
               key={k}
               onClick={() => loadPreset(k)}
-              className="px-3 py-1.5 border border-border bg-secondary hover:border-primary hover:text-primary text-xs uppercase tracking-wider transition-colors"
+              className="px-3 py-1.5 bg-card border border-border rounded-full text-xs font-medium hover:border-primary hover:text-primary hover:shadow-md transition-all"
             >
               {k}
             </button>
           ))}
         </div>
 
-        {/* 3-panel layout */}
-        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-          {/* Panel 1: Input */}
-          <section className="panel p-5 space-y-5">
-            <div className="flex items-center justify-between border-b border-border pb-3">
-              <h2 className="text-sm font-bold uppercase tracking-widest">Water Sample Input</h2>
-              <span className="font-mono text-[10px] text-muted-foreground">P-01</span>
+        {/* Layout: Input (left) + Results (right) */}
+        <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
+          {/* INPUT PANEL */}
+          <section className="lg:col-span-4 card-soft p-6 space-y-5 animate-fade-in-up">
+            <div className="flex items-center justify-between pb-3 border-b border-border">
+              <div>
+                <h2 className="font-display text-lg font-bold">Sample Input</h2>
+                <p className="text-xs text-muted-foreground">Adjust parameters to analyze</p>
+              </div>
+              <div className="w-9 h-9 rounded-xl bg-primary/10 text-primary flex items-center justify-center">
+                <Beaker className="w-5 h-5" />
+              </div>
             </div>
 
-            <SliderRow
-              label="pH Level" unit="" value={inputs.ph}
-              min={0} max={14} step={0.1}
-              onChange={(v) => update("ph", v)}
-              indicator={phInd}
-            />
-            <SliderRow
-              label="Turbidity" unit="NTU" value={inputs.turbidity}
-              min={0} max={500} step={1}
-              onChange={(v) => update("turbidity", v)}
-            />
-            <SliderRow
-              label="TDS" unit="mg/L" value={inputs.tds}
-              min={0} max={2000} step={1}
-              onChange={(v) => update("tds", v)}
-            />
-            <SliderRow
-              label="BOD" unit="mg/L" value={inputs.bod}
-              min={0} max={500} step={1}
-              onChange={(v) => update("bod", v)}
-            />
+            <SliderRow icon={Activity} label="pH Level" unit="" value={inputs.ph}
+              min={0} max={14} step={0.1} onChange={(v) => update("ph", v)} indicator={phInd} />
+            <SliderRow icon={Droplets} label="Turbidity" unit="NTU" value={inputs.turbidity}
+              min={0} max={500} step={1} onChange={(v) => update("turbidity", v)} />
+            <SliderRow icon={Filter} label="TDS" unit="mg/L" value={inputs.tds}
+              min={0} max={2000} step={1} onChange={(v) => update("tds", v)} />
+            <SliderRow icon={Zap} label="BOD" unit="mg/L" value={inputs.bod}
+              min={0} max={500} step={1} onChange={(v) => update("bod", v)} />
 
             <div className="space-y-2">
-              <label className="text-xs uppercase tracking-wider text-muted-foreground">Wastewater Source</label>
+              <label className="text-sm font-medium text-foreground">Wastewater Source</label>
               <select
                 value={inputs.source}
                 onChange={(e) => update("source", e.target.value)}
-                className="w-full bg-input border border-border px-3 py-2 font-mono text-sm focus:outline-none focus:border-primary"
+                className="w-full bg-secondary/60 border border-border rounded-lg px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-primary/30 transition"
               >
                 {SOURCES.map((s) => <option key={s}>{s}</option>)}
               </select>
@@ -368,198 +427,269 @@ ${analysis.narrative}
             <button
               onClick={runAnalysis}
               disabled={loading}
-              className="w-full bg-primary text-primary-foreground py-3 font-bold uppercase tracking-widest text-sm flex items-center justify-center gap-2 hover:opacity-90 disabled:opacity-50 transition-opacity glow"
+              className="w-full bg-gradient-primary text-primary-foreground py-3.5 rounded-xl font-semibold text-sm flex items-center justify-center gap-2 hover:scale-[1.02] hover:shadow-lg hover:shadow-primary/30 active:scale-100 disabled:opacity-60 disabled:scale-100 transition-all glow-ring"
             >
               {loading ? (
                 <>
-                  <span className="w-4 h-4 border-2 border-primary-foreground border-t-transparent rounded-full animate-spin" />
-                  Analyzing
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                  Analyzing sample…
                 </>
               ) : (
                 <>
-                  <svg viewBox="0 0 24 24" className="w-4 h-4" fill="currentColor">
-                    <path d="M12 2 L18 12 a6 6 0 1 1 -12 0 Z" />
-                  </svg>
+                  <Play className="w-4 h-4 fill-current" />
                   Analyze Sample
                 </>
               )}
             </button>
           </section>
 
-          {/* Panel 2: Pipeline */}
-          <section className="panel p-5 space-y-5">
-            <div className="flex items-center justify-between border-b border-border pb-3">
-              <h2 className="text-sm font-bold uppercase tracking-widest">Treatment Pipeline</h2>
-              <span className="font-mono text-[10px] text-muted-foreground">P-02</span>
-            </div>
-
-            {/* Vertical on desktop, horizontal on mobile */}
-            <div className="flex flex-row md:flex-col lg:flex-col gap-0 md:gap-0">
-              <div className="flex flex-col md:flex-row lg:flex-col items-stretch w-full">
-                <div className="flex-1">
-                  <PipelineStage
-                    idx={1} label="Primary" sub="Solid Removal"
-                    active={analysis?.treatmentStages.primary ?? false}
-                  />
-                </div>
-                <Arrow active={analysis?.treatmentStages.primary ?? false} />
-                <div className="flex-1">
-                  <PipelineStage
-                    idx={2} label="Secondary" sub="Biological / Organic"
-                    active={analysis?.treatmentStages.secondary ?? false}
-                  />
-                </div>
-                <Arrow active={analysis?.treatmentStages.secondary ?? false} />
-                <div className="flex-1">
-                  <PipelineStage
-                    idx={3} label="Tertiary" sub="RO / Filtration / UV"
-                    active={analysis?.treatmentStages.tertiary ?? false}
-                  />
-                </div>
-              </div>
-            </div>
-
-            <div className="grid grid-cols-3 gap-2 pt-2">
-              {loading ? (
-                <>
-                  <Skeleton className="h-16" />
-                  <Skeleton className="h-16" />
-                  <Skeleton className="h-16" />
-                </>
-              ) : (
-                <>
-                  <MetricCard label="Cost" value={analysis ? `₹${analysis.costPerKL}` : "—"} unit="/kL" />
-                  <MetricCard label="Energy" value={analysis ? `${analysis.energyKWh}` : "—"} unit="kWh/kL" />
-                  <MetricCard label="Efficiency" value={analysis ? `${analysis.efficiencyPercent}` : "—"} unit="%" />
-                </>
-              )}
-            </div>
-          </section>
-
-          {/* Panel 3: AI Analysis */}
-          <section className="panel p-5 space-y-5" ref={reportRef}>
-            <div className="flex items-center justify-between border-b border-border pb-3">
-              <h2 className="text-sm font-bold uppercase tracking-widest">AI Analysis</h2>
-              <span className="font-mono text-[10px] text-muted-foreground">P-03</span>
-            </div>
-
-            {error && (
-              <div className="border border-destructive bg-destructive/10 p-4 space-y-3">
-                <div className="flex items-center gap-2">
-                  <span className="text-destructive font-mono">✗</span>
-                  <span className="text-sm font-bold uppercase tracking-wider text-destructive">Analysis Error</span>
-                </div>
-                <p className="text-xs text-muted-foreground font-mono">{error}</p>
-                <button
-                  onClick={runAnalysis}
-                  className="px-3 py-1.5 border border-destructive text-destructive text-xs uppercase tracking-wider hover:bg-destructive hover:text-destructive-foreground transition-colors"
-                >
-                  Retry
-                </button>
-              </div>
-            )}
-
-            {loading && !error && (
-              <div className="space-y-4">
-                <div className="flex items-center justify-center">
-                  <Skeleton className="w-44 h-44 rounded-full" />
-                </div>
-                <Skeleton className="h-6 w-32 mx-auto" />
-                <Skeleton className="h-32 w-full" />
-              </div>
-            )}
-
-            {!loading && !error && !analysis && (
-              <div className="flex flex-col items-center justify-center py-16 text-center space-y-3">
-                <div className="w-16 h-16 border border-border flex items-center justify-center text-muted-foreground">
-                  <svg viewBox="0 0 24 24" className="w-8 h-8" fill="none" stroke="currentColor" strokeWidth="1.5">
-                    <path d="M12 2 L18 12 a6 6 0 1 1 -12 0 Z" />
-                  </svg>
-                </div>
-                <p className="text-xs uppercase tracking-widest text-muted-foreground">Awaiting sample analysis</p>
-              </div>
-            )}
-
-            {!loading && !error && analysis && (
-              <>
-                <div className="flex flex-col items-center gap-3">
-                  <QualityRing score={analysis.qualityScore} />
-                  <div
-                    className="px-4 py-1.5 border font-mono text-xs uppercase tracking-widest"
-                    style={{
-                      color: `hsl(var(--${reuseBadgeColor(analysis.reuseClass)}))`,
-                      borderColor: `hsl(var(--${reuseBadgeColor(analysis.reuseClass)}))`,
-                      boxShadow: `0 0 12px hsl(var(--${reuseBadgeColor(analysis.reuseClass)}) / 0.4)`,
-                    }}
-                  >
-                    {analysis.reuseClass}
-                  </div>
-                </div>
-
-                <div className="border border-border">
-                  <div className="grid grid-cols-[1fr_auto_auto_auto] gap-2 px-3 py-2 border-b border-border bg-secondary text-[10px] uppercase tracking-widest text-muted-foreground font-mono">
-                    <span>Param</span><span>Value</span><span>Std</span><span>Status</span>
-                  </div>
-                  {[
-                    { k: "ph", label: "pH", v: inputs.ph, std: STANDARDS.ph },
-                    { k: "turbidity", label: "Turbidity", v: `${inputs.turbidity} NTU`, std: STANDARDS.turbidity },
-                    { k: "tds", label: "TDS", v: `${inputs.tds} mg/L`, std: STANDARDS.tds },
-                    { k: "bod", label: "BOD", v: `${inputs.bod} mg/L`, std: STANDARDS.bod },
-                  ].map((row) => (
-                    <div key={row.k} className="grid grid-cols-[1fr_auto_auto_auto] gap-2 px-3 py-2 border-b border-border last:border-0 items-center text-xs">
-                      <span className="uppercase tracking-wider text-muted-foreground">{row.label}</span>
-                      <span className="font-mono text-foreground">{row.v}</span>
-                      <span className="font-mono text-muted-foreground text-[10px]">{row.std}</span>
-                      <StatusIcon s={analysis.parameterStatus[row.k as keyof typeof analysis.parameterStatus]} />
-                    </div>
-                  ))}
-                </div>
-
+          {/* RESULTS AREA */}
+          <div className="lg:col-span-8 space-y-6" ref={reportRef}>
+            {/* Treatment Pipeline */}
+            <section className="card-soft p-6 animate-fade-in-up">
+              <div className="flex items-center justify-between pb-3 border-b border-border mb-4">
                 <div>
-                  <div className="text-[10px] uppercase tracking-widest text-muted-foreground mb-2 font-mono">// AI Report</div>
-                  <div className="border-l-2 border-primary pl-3 text-xs leading-relaxed text-foreground/90 whitespace-pre-wrap font-mono">
-                    {analysis.narrative}
+                  <h2 className="font-display text-lg font-bold">Treatment Pipeline</h2>
+                  <p className="text-xs text-muted-foreground">Active stages selected by AI based on sample quality</p>
+                </div>
+                <div className="w-9 h-9 rounded-xl bg-accent/10 text-accent flex items-center justify-center">
+                  <Filter className="w-5 h-5" />
+                </div>
+              </div>
+
+              <div className="flex flex-col md:flex-row items-stretch gap-3">
+                <StageCard idx={1} label="Primary" sub="Solid removal & screening"
+                  icon={Filter} active={stages?.primary ?? false} />
+                <div className="flex items-center justify-center md:px-1">
+                  <ArrowRight className={`w-5 h-5 ${stages?.secondary ? "text-primary" : "text-muted-foreground/40"}`} />
+                </div>
+                <StageCard idx={2} label="Secondary" sub="Biological / organic breakdown"
+                  icon={Activity} active={stages?.secondary ?? false} />
+                <div className="flex items-center justify-center md:px-1">
+                  <ArrowRight className={`w-5 h-5 ${stages?.tertiary ? "text-primary" : "text-muted-foreground/40"}`} />
+                </div>
+                <StageCard idx={3} label="Tertiary" sub="RO / UV / fine filtration"
+                  icon={Sparkles} active={stages?.tertiary ?? false} />
+              </div>
+
+              {/* Metrics row */}
+              <div className="grid grid-cols-3 gap-3 mt-5">
+                {loading ? (
+                  <><Skeleton className="h-20" /><Skeleton className="h-20" /><Skeleton className="h-20" /></>
+                ) : (
+                  <>
+                    <MetricTile icon={IndianRupee} label="Cost" value={analysis ? `₹${analysis.costPerKL}` : "—"} sub="per kL" tone="primary" />
+                    <MetricTile icon={Zap} label="Energy" value={analysis ? `${analysis.energyKWh}` : "—"} sub="kWh/kL" tone="warning" />
+                    <MetricTile icon={CheckCircle2} label="Efficiency" value={analysis ? `${analysis.efficiencyPercent}%` : "—"} sub="removal" tone="success" />
+                  </>
+                )}
+              </div>
+            </section>
+
+            {/* GRAPHS ROW */}
+            <div className="grid grid-cols-1 xl:grid-cols-2 gap-6">
+              {/* Before vs After */}
+              <section className="card-soft p-6 animate-fade-in-up">
+                <div className="flex items-center justify-between mb-4">
+                  <div>
+                    <h3 className="font-display text-base font-bold">Before vs After Treatment</h3>
+                    <p className="text-xs text-muted-foreground">Pollutant reduction across selected stages</p>
+                  </div>
+                  <div className="flex items-center gap-3 text-[10px] font-mono">
+                    <span className="flex items-center gap-1.5"><span className="w-2.5 h-2.5 rounded-sm bg-destructive/70" />Before</span>
+                    <span className="flex items-center gap-1.5"><span className="w-2.5 h-2.5 rounded-sm bg-success" />After</span>
                   </div>
                 </div>
+                <div className="h-64">
+                  <ResponsiveContainer width="100%" height="100%" key={chartKey}>
+                    <BarChart data={beforeAfterData} barGap={8}>
+                      <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" vertical={false} />
+                      <XAxis dataKey="name" stroke="hsl(var(--muted-foreground))" fontSize={12} />
+                      <YAxis stroke="hsl(var(--muted-foreground))" fontSize={11} />
+                      <Tooltip
+                        contentStyle={{
+                          background: "hsl(var(--card))",
+                          border: "1px solid hsl(var(--border))",
+                          borderRadius: 12,
+                          boxShadow: "var(--shadow-elevated)",
+                          fontSize: 12,
+                        }}
+                      />
+                      <Bar dataKey="before" name="Before" fill="hsl(var(--destructive) / 0.7)" radius={[8, 8, 0, 0]} animationDuration={900} />
+                      <Bar dataKey="after" name="After" fill="hsl(var(--success))" radius={[8, 8, 0, 0]} animationDuration={1100} />
+                    </BarChart>
+                  </ResponsiveContainer>
+                </div>
+              </section>
 
-                <button
-                  onClick={exportReport}
-                  className="w-full border border-border bg-secondary py-2 text-xs uppercase tracking-widest hover:border-primary hover:text-primary transition-colors"
-                >
-                  ↓ Export Report (.txt)
-                </button>
-              </>
-            )}
-          </section>
+              {/* Cost vs Treatment Level */}
+              <section className="card-soft p-6 animate-fade-in-up">
+                <div className="flex items-center justify-between mb-4">
+                  <div>
+                    <h3 className="font-display text-base font-bold">Cost vs Treatment Level</h3>
+                    <p className="text-xs text-muted-foreground">
+                      {analysis ? (
+                        <>Total: <span className="text-primary font-semibold">₹{totalCost}/kL</span> · Saved: <span className="text-success font-semibold">₹{costSaved}/kL</span></>
+                      ) : "Run analysis to highlight selected path"}
+                    </p>
+                  </div>
+                </div>
+                <div className="h-64">
+                  <ResponsiveContainer width="100%" height="100%" key={chartKey}>
+                    <BarChart data={costData}>
+                      <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" vertical={false} />
+                      <XAxis dataKey="stage" stroke="hsl(var(--muted-foreground))" fontSize={12} />
+                      <YAxis stroke="hsl(var(--muted-foreground))" fontSize={11} unit="₹" />
+                      <Tooltip
+                        contentStyle={{
+                          background: "hsl(var(--card))",
+                          border: "1px solid hsl(var(--border))",
+                          borderRadius: 12,
+                          boxShadow: "var(--shadow-elevated)",
+                          fontSize: 12,
+                        }}
+                        formatter={(v: any) => [`₹${v}/kL`, "Cost"]}
+                      />
+                      <Bar dataKey="cost" radius={[8, 8, 0, 0]} animationDuration={900}>
+                        {costData.map((d, i) => (
+                          <Cell key={i} fill={d.active ? "hsl(var(--primary))" : "hsl(var(--muted-foreground) / 0.3)"} />
+                        ))}
+                      </Bar>
+                    </BarChart>
+                  </ResponsiveContainer>
+                </div>
+                <div className="mt-3 flex items-center gap-3 text-[10px] font-mono text-muted-foreground">
+                  <span className="flex items-center gap-1.5"><span className="w-2.5 h-2.5 rounded-sm bg-primary" />Selected</span>
+                  <span className="flex items-center gap-1.5"><span className="w-2.5 h-2.5 rounded-sm bg-muted-foreground/30" />Skipped</span>
+                </div>
+              </section>
+            </div>
+
+            {/* AI Analysis */}
+            <section className="card-soft p-6 animate-fade-in-up">
+              <div className="flex items-center justify-between pb-3 border-b border-border mb-4">
+                <div>
+                  <h2 className="font-display text-lg font-bold flex items-center gap-2">
+                    <Sparkles className="w-5 h-5 text-accent" />
+                    AI Quality Assessment
+                  </h2>
+                  <p className="text-xs text-muted-foreground">Powered by Gemini · Instant decision intelligence</p>
+                </div>
+              </div>
+
+              {error && (
+                <div className="rounded-xl border border-destructive/30 bg-destructive/5 p-4 space-y-3 animate-scale-in">
+                  <div className="flex items-center gap-2">
+                    <AlertCircle className="w-5 h-5 text-destructive" />
+                    <span className="font-semibold text-destructive">Analysis Error</span>
+                  </div>
+                  <p className="text-sm text-muted-foreground">{error}</p>
+                  <button onClick={runAnalysis} className="px-3 py-1.5 rounded-lg bg-destructive text-destructive-foreground text-xs font-semibold hover:opacity-90 transition">
+                    Retry analysis
+                  </button>
+                </div>
+              )}
+
+              {loading && !error && (
+                <div className="grid md:grid-cols-[auto_1fr] gap-6 items-start">
+                  <Skeleton className="w-44 h-44 rounded-full" />
+                  <div className="space-y-3 w-full">
+                    <Skeleton className="h-6 w-32" />
+                    <Skeleton className="h-24 w-full" />
+                    <Skeleton className="h-24 w-full" />
+                  </div>
+                </div>
+              )}
+
+              {!loading && !error && !analysis && (
+                <div className="flex flex-col items-center justify-center py-12 text-center space-y-3">
+                  <div className="w-16 h-16 rounded-2xl bg-gradient-hero flex items-center justify-center text-primary">
+                    <Droplets className="w-8 h-8" />
+                  </div>
+                  <p className="text-sm text-muted-foreground">Adjust parameters and click <span className="font-semibold text-foreground">Analyze Sample</span> to begin</p>
+                </div>
+              )}
+
+              {!loading && !error && analysis && (
+                <div className="grid md:grid-cols-[auto_1fr] gap-6 items-start animate-scale-in">
+                  <div className="flex flex-col items-center gap-3">
+                    <QualityRing score={analysis.qualityScore} />
+                    <div className={`px-4 py-1.5 rounded-full border font-mono text-xs font-semibold tracking-widest ${reuseStyle(analysis.reuseClass)}`}>
+                      {analysis.reuseClass}
+                    </div>
+                  </div>
+
+                  <div className="space-y-4 w-full">
+                    {/* Param table */}
+                    <div className="rounded-xl border border-border overflow-hidden">
+                      <div className="grid grid-cols-[1fr_auto_auto_auto] gap-3 px-4 py-2.5 bg-secondary/60 text-[10px] uppercase tracking-widest text-muted-foreground font-semibold">
+                        <span>Parameter</span><span>Value</span><span>Standard</span><span>Status</span>
+                      </div>
+                      {[
+                        { k: "ph", label: "pH", v: inputs.ph, std: STANDARDS.ph },
+                        { k: "turbidity", label: "Turbidity", v: `${inputs.turbidity} NTU`, std: STANDARDS.turbidity },
+                        { k: "tds", label: "TDS", v: `${inputs.tds} mg/L`, std: STANDARDS.tds },
+                        { k: "bod", label: "BOD", v: `${inputs.bod} mg/L`, std: STANDARDS.bod },
+                      ].map((row) => (
+                        <div key={row.k} className="grid grid-cols-[1fr_auto_auto_auto] gap-3 px-4 py-2.5 border-t border-border items-center text-sm">
+                          <span className="font-medium text-foreground">{row.label}</span>
+                          <span className="font-mono text-foreground">{row.v}</span>
+                          <span className="font-mono text-muted-foreground text-xs">{row.std}</span>
+                          <StatusPill s={analysis.parameterStatus[row.k as keyof typeof analysis.parameterStatus]} />
+                        </div>
+                      ))}
+                    </div>
+
+                    <div>
+                      <div className="text-xs font-semibold uppercase tracking-wider text-muted-foreground mb-2">AI Report</div>
+                      <div className="rounded-xl bg-gradient-hero border border-border p-4 text-sm leading-relaxed text-foreground/90 whitespace-pre-wrap">
+                        {analysis.narrative}
+                      </div>
+                    </div>
+
+                    <button
+                      onClick={exportReport}
+                      className="w-full sm:w-auto inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl bg-card border border-border text-sm font-medium hover:border-primary hover:text-primary hover:shadow-md transition"
+                    >
+                      <Download className="w-4 h-4" />
+                      Export Report (.txt)
+                    </button>
+                  </div>
+                </div>
+              )}
+            </section>
+          </div>
         </div>
 
         {/* History */}
-        <section className="panel p-5">
-          <div className="flex items-center justify-between border-b border-border pb-3 mb-4">
-            <h2 className="text-sm font-bold uppercase tracking-widest">Analysis History</h2>
-            <span className="font-mono text-[10px] text-muted-foreground">LAST 5</span>
+        <section className="card-soft p-6 animate-fade-in-up">
+          <div className="flex items-center justify-between pb-3 border-b border-border mb-4">
+            <h2 className="font-display text-lg font-bold">Analysis History</h2>
+            <span className="text-xs text-muted-foreground font-mono">Last 5 runs</span>
           </div>
           {history.length === 0 ? (
-            <p className="text-xs text-muted-foreground font-mono py-4">// No analyses yet</p>
+            <p className="text-sm text-muted-foreground py-4">No analyses yet — run your first sample to populate history.</p>
           ) : (
             <div className="overflow-x-auto">
-              <table className="w-full text-xs">
+              <table className="w-full text-sm">
                 <thead>
-                  <tr className="text-[10px] uppercase tracking-widest text-muted-foreground font-mono border-b border-border">
-                    <th className="text-left py-2 font-normal">Timestamp</th>
-                    <th className="text-left py-2 font-normal">Source</th>
-                    <th className="text-right py-2 font-normal">Score</th>
-                    <th className="text-right py-2 font-normal">Class</th>
+                  <tr className="text-[10px] uppercase tracking-widest text-muted-foreground font-semibold border-b border-border">
+                    <th className="text-left py-2.5 font-semibold">Timestamp</th>
+                    <th className="text-left py-2.5 font-semibold">Source</th>
+                    <th className="text-right py-2.5 font-semibold">Score</th>
+                    <th className="text-right py-2.5 font-semibold">Class</th>
                   </tr>
                 </thead>
-                <tbody className="font-mono">
+                <tbody>
                   {history.map((h, i) => (
-                    <tr key={i} className="border-b border-border last:border-0">
-                      <td className="py-2 text-muted-foreground">{new Date(h.ts).toLocaleString()}</td>
-                      <td className="py-2">{h.source}</td>
-                      <td className="py-2 text-right" style={{ color: scoreColor(h.score) }}>{h.score}</td>
-                      <td className="py-2 text-right" style={{ color: `hsl(var(--${reuseBadgeColor(h.reuseClass)}))` }}>
-                        {h.reuseClass}
+                    <tr key={i} className="border-b border-border last:border-0 hover:bg-secondary/40 transition">
+                      <td className="py-2.5 text-muted-foreground font-mono text-xs">{new Date(h.ts).toLocaleString()}</td>
+                      <td className="py-2.5">{h.source}</td>
+                      <td className="py-2.5 text-right font-mono font-semibold" style={{ color: scoreHsl(h.score) }}>{h.score}</td>
+                      <td className="py-2.5 text-right">
+                        <span className={`inline-block px-2 py-0.5 rounded-full border text-[10px] font-mono font-semibold ${reuseStyle(h.reuseClass)}`}>
+                          {h.reuseClass}
+                        </span>
                       </td>
                     </tr>
                   ))}
@@ -569,10 +699,34 @@ ${analysis.narrative}
           )}
         </section>
 
-        <footer className="text-center text-[10px] uppercase tracking-widest text-muted-foreground font-mono py-4">
+        <footer className="text-center text-xs text-muted-foreground py-6">
           AquaIQ © 2026 — IS-10500 / CPCB Reference Standards
         </footer>
       </main>
+    </div>
+  );
+}
+
+function MetricTile({
+  icon: Icon, label, value, sub, tone,
+}: { icon: any; label: string; value: string; sub: string; tone: "primary" | "warning" | "success" }) {
+  const toneClass = tone === "primary"
+    ? "bg-primary/10 text-primary"
+    : tone === "warning"
+    ? "bg-warning/10 text-warning"
+    : "bg-success/10 text-success";
+  return (
+    <div className="rounded-xl bg-secondary/40 border border-border p-3 hover:shadow-md transition">
+      <div className="flex items-center gap-2">
+        <div className={`w-8 h-8 rounded-lg flex items-center justify-center ${toneClass}`}>
+          <Icon className="w-4 h-4" />
+        </div>
+        <div className="text-[10px] uppercase tracking-widest text-muted-foreground font-semibold">{label}</div>
+      </div>
+      <div className="mt-2 flex items-baseline gap-1">
+        <span className="font-display text-2xl font-bold text-foreground">{value}</span>
+        <span className="text-[10px] text-muted-foreground font-mono">{sub}</span>
+      </div>
     </div>
   );
 }
