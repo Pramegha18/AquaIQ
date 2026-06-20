@@ -265,7 +265,7 @@ Built for the Smart Wastewater Treatment & Reuse System Hackathon
 | Name | Role |
 |---|---|
 | Pramegha | Team Lead · UI/UX Design |
-| [Teammate 2] | Frontend Development |
+| Sai Siddarth B | Frontend Development |
 | [Teammate 3] | AI Integration |
 | [Teammate 4] | Research & Standards |
 
